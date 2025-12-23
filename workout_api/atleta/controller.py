@@ -1,5 +1,9 @@
+from fastapi_pagination import Page, paginate
+from workout_api.atleta.schemas import AtletaListOut
+
 from datetime import datetime
 from uuid import uuid4
+
 from fastapi import APIRouter, Body, HTTPException, status
 from pydantic import UUID4
 
@@ -10,6 +14,8 @@ from workout_api.centro_treinamento.models import CentroTreinamentoModel
 
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
+
 
 router = APIRouter()
 
@@ -46,33 +52,57 @@ async def post(
             detail=f'O centro de treinamento {centro_treinamento_nome} não foi encontrado.'
         )
     try:
-        atleta_out = AtletaOut(id=uuid4(), created_at=datetime.utcnow(), **atleta_in.model_dump())
-        atleta_model = AtletaModel(**atleta_out.model_dump(exclude={'categoria', 'centro_treinamento'}))
+        atleta_out = AtletaOut(
+            id=uuid4(),
+            created_at=datetime.utcnow(),
+            **atleta_in.model_dump()
+        )
+
+        atleta_model = AtletaModel(
+            **atleta_out.model_dump(
+                exclude={'categoria', 'centro_treinamento'}
+            )
+        )
 
         atleta_model.categoria_id = categoria.pk_id
         atleta_model.centro_treinamento_id = centro_treinamento.pk_id
-        
+
         db_session.add(atleta_model)
         await db_session.commit()
-    except Exception:
+
+    except IntegrityError:
+        await db_session.rollback()
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail='Ocorreu um erro ao inserir os dados no banco'
+            status_code=303,
+            detail=f"Já existe um atleta cadastrado com o cpf: {atleta_in.cpf}"
         )
+
 
     return atleta_out
 
 
 @router.get(
-    '/', 
+    '/',
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=Page[AtletaListOut],
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
-    atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
-    
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
+
+async def query(
+    db_session: DatabaseDependency,
+    nome: str | None = None,
+    cpf: str | None = None,
+):
+    query = select(AtletaModel)
+
+    if nome:
+        query = query.where(AtletaModel.nome.ilike(f"%{nome}%"))
+
+    if cpf:
+        query = query.where(AtletaModel.cpf == cpf)
+
+    atletas = (await db_session.execute(query)).scalars().all()
+    return paginate(atletas)
 
 
 @router.get(
